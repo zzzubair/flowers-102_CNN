@@ -1,22 +1,16 @@
-print(f"You're running the training script.")
-
-#Necessary imports
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader
-from torchvision.datasets import Flowers102
+import argparse
 import copy
-print(f"Imports done.")
+
+import torch
+from torch import nn, optim
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from torchvision.datasets import Flowers102
+
+from model import FlowerClassifier
 
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using: {device}")
-
-
-#Transforms 
-train_transform = transforms.Compose([
+TRAIN_TRANSFORM = transforms.Compose([
     transforms.RandomResizedCrop(224),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
@@ -25,152 +19,84 @@ train_transform = transforms.Compose([
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
-
-test_transform = transforms.Compose([
+TEST_TRANSFORM = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-# Load dataset
-train_set = Flowers102(root='data', split='train', download=True, transform=train_transform)
-val_set = Flowers102(root='data', split='val', download=True, transform=test_transform)
-test_set = Flowers102(root='data', split='test', download=True, transform=test_transform)
-print(f"Data sets loaded.")
 
-#Load dataloaders
-train_loader = DataLoader(train_set, batch_size=64, shuffle=True)
-val_loader = DataLoader(val_set, batch_size=64, shuffle=False)
-test_loader = DataLoader(test_set, batch_size=64, shuffle=False)
-print(f"Dataloaders loaded.")
-
-#Neural Network
-class FlowerClassifier(nn.Module):
-    def __init__(self):
-        super(FlowerClassifier, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ELU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ELU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ELU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-        )
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(128 * 14 * 14, 512),
-            nn.BatchNorm1d(512),
-            nn.ELU(),
-            nn.Dropout(0.5),
-            nn.Linear(512, 102)
-        )
-
-    def forward(self, x):
-        x = self.features(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
-        return x
-
-#Load model
-model = FlowerClassifier().to(device)
-print(f"Model Initialized.")
-
-#Train function
-def train_model(model, criterion, optimizer, scheduler, train_loader, val_loader, num_epochs):
-    best_model_wts = copy.deepcopy(model.state_dict())
-    best_acc = 0.0
-
-    for epoch in range(num_epochs):
-        print(f'Epoch {epoch+1}/{num_epochs}')
-        print('-' * 10)
-
-        for phase in ['train', 'val']:
-            if phase == 'train':
-                model.train()
-                dataloader = train_loader
-            else:
-                model.eval()
-                dataloader = val_loader
-
+def train_model(model, criterion, optimizer, scheduler, train_loader, val_loader, epochs, device):
+    best_weights = copy.deepcopy(model.state_dict())
+    best_accuracy = 0.0
+    for epoch in range(epochs):
+        print(f"Epoch {epoch + 1}/{epochs}")
+        for phase, loader in (("train", train_loader), ("val", val_loader)):
+            model.train(phase == "train")
             running_loss = 0.0
-            running_corrects = 0
-
-            for inputs, labels in dataloader:
-                inputs = inputs.to(device)
-                labels = labels.to(device)
-
+            running_correct = 0
+            for inputs, labels in loader:
+                inputs, labels = inputs.to(device), labels.to(device)
                 optimizer.zero_grad()
-
-                with torch.set_grad_enabled(phase == 'train'):
+                with torch.set_grad_enabled(phase == "train"):
                     outputs = model(inputs)
                     loss = criterion(outputs, labels)
-                    _, preds = torch.max(outputs, 1)
-
-                    if phase == 'train':
+                    predictions = outputs.argmax(1)
+                    if phase == "train":
                         loss.backward()
                         optimizer.step()
-
                 running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(preds == labels.data)
-
-            epoch_loss = running_loss / len(dataloader.dataset)
-            epoch_acc = running_corrects.double() / len(dataloader.dataset) * 100
-
-            print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.2f}%')
-
-            if phase == 'val' and epoch_acc > best_acc:
-                best_acc = epoch_acc
-                best_model_wts = copy.deepcopy(model.state_dict())
-
+                running_correct += (predictions == labels).sum().item()
+            accuracy = 100 * running_correct / len(loader.dataset)
+            print(f"{phase} Loss: {running_loss / len(loader.dataset):.4f} Acc: {accuracy:.2f}%")
+            if phase == "val" and accuracy > best_accuracy:
+                best_accuracy = accuracy
+                best_weights = copy.deepcopy(model.state_dict())
         scheduler.step()
-
-        print()
-
-    print(f'Best val Acc: {best_acc:.2f}%')
-    model.load_state_dict(best_model_wts)
+    model.load_state_dict(best_weights)
     return model
 
-#Hyperparams
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.0001)
 
-
-scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.001, total_steps=1000, pct_start=0.3)
-model = train_model(model, criterion, optimizer, scheduler, train_loader, val_loader, 1000)
-print(f"Trained 1000 epochs. First part of training done.")
-#Change scheduler and train model
-scheduler = optim.lr_scheduler.CyclicLR(optimizer, base_lr=0.0001, max_lr=0.001, step_size_up=5, mode='triangular2', cycle_momentum=False)
-model = train_model(model, criterion, optimizer, scheduler, train_loader, val_loader, 1000)
-print(f"Trained 2000 epochs. Training done.")
-
-
-def evaluate_model(model, dataloader):
+def evaluate_model(model, loader, device):
     model.eval()
-    running_corrects = 0
-
-    for inputs, labels in dataloader:
-        inputs = inputs.to(device)
-        labels = labels.to(device)
-
-        with torch.no_grad():
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
-
-        running_corrects += torch.sum(preds == labels.data)
-
-    accuracy = running_corrects.double() / len(dataloader.dataset) * 100  # Convert to percentage
-    print(f'Test Accuracy: {accuracy:.2f}%')
-
-evaluate_model(model, test_loader) # Evaluate model
-print(f"Training and Evaluation done.")
+    correct = 0
+    with torch.no_grad():
+        for inputs, labels in loader:
+            predictions = model(inputs.to(device)).argmax(1)
+            correct += (predictions == labels.to(device)).sum().item()
+    accuracy = 100 * correct / len(loader.dataset)
+    print(f"Test Accuracy: {accuracy:.2f}%")
+    return accuracy
 
 
+def data_loaders(data_dir, batch_size):
+    datasets = {
+        "train": Flowers102(data_dir, split="train", download=True, transform=TRAIN_TRANSFORM),
+        "val": Flowers102(data_dir, split="val", download=True, transform=TEST_TRANSFORM),
+        "test": Flowers102(data_dir, split="test", download=True, transform=TEST_TRANSFORM),
+    }
+    return tuple(DataLoader(datasets[name], batch_size=batch_size, shuffle=name == "train") for name in ("train", "val", "test"))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-dir", default="data")
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--epochs-per-phase", type=int, default=1000)
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    train_loader, val_loader, test_loader = data_loaders(args.data_dir, args.batch_size)
+    model = FlowerClassifier().to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.0001)
+    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.001, total_steps=args.epochs_per_phase)
+    model = train_model(model, criterion, optimizer, scheduler, train_loader, val_loader, args.epochs_per_phase, device)
+    scheduler = optim.lr_scheduler.CyclicLR(optimizer, base_lr=0.0001, max_lr=0.001, step_size_up=5, mode="triangular2", cycle_momentum=False)
+    model = train_model(model, criterion, optimizer, scheduler, train_loader, val_loader, args.epochs_per_phase, device)
+    evaluate_model(model, test_loader, device)
+
+
+if __name__ == "__main__":
+    main()
